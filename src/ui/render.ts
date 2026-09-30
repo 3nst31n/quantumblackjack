@@ -1,26 +1,31 @@
 // Pure-ish DOM rendering. All game rules live in src/game; this file only
-// turns a GameState + UiState into DOM elements and wires up click handlers.
+// turns a TableState + UiState into DOM elements and wires up click handlers.
 
 import type { Card } from '../game/cards';
-import type { GameState } from '../game/engine';
+import type { PlayerState, TableState } from '../game/table';
 import { computeHandRange } from '../game/blackjack';
 import { WIN_GOAL, ENTANGLEMENT_COST } from '../game/chips';
 import type { EntanglementMode } from '../game/quantum';
 import { findEntanglementForCard } from '../game/quantum';
 
+export type AppPhase = 'setup' | 'table';
 export type UiMode = 'idle' | 'observe' | 'entangle';
+export type ZoomStage = 'closed' | 'opening' | 'open' | 'closing';
 
 export interface UiState {
   mode: UiMode;
   selected: string[];
   pendingMode: EntanglementMode | null;
+  zoomStage: ZoomStage;
+  justWonPlayerId: string | null;
 }
 
 export function createInitialUiState(): UiState {
-  return { mode: 'idle', selected: [], pendingMode: null };
+  return { mode: 'idle', selected: [], pendingMode: null, zoomStage: 'closed', justWonPlayerId: null };
 }
 
 export interface Handlers {
+  onStartGame(names: string[]): void;
   onHit(): void;
   onStand(): void;
   onStartObserve(): void;
@@ -29,8 +34,8 @@ export interface Handlers {
   onChooseEntangleMode(mode: EntanglementMode): void;
   onConfirmEntangle(): void;
   onCancel(): void;
-  onRestart(): void;
-  onNextRound(): void;
+  onNext(): void;
+  onDismissWinPopup(): void;
 }
 
 const SUIT_SYMBOLS: Record<string, string> = { hearts: '♥', diamonds: '♦', clubs: '♣', spades: '♠' };
@@ -102,26 +107,73 @@ function renderResolvedQuantumValues(values: [number, number], chosenSide: 0 | 1
   return wrap;
 }
 
-function renderHeader(state: GameState): HTMLElement {
-  const header = el('header', 'header');
-  header.appendChild(el('h1', 'title', 'Quantum Blackjack'));
-  const chips = el('div', 'chips');
-  chips.appendChild(el('span', 'chips__count', `Chips: ${state.chips} / ${WIN_GOAL}`));
+function renderChipsBar(chips: number): HTMLElement {
+  const chipsEl = el('div', 'chips');
+  chipsEl.appendChild(el('span', 'chips__count', `Chips: ${chips} / ${WIN_GOAL}`));
   const bar = el('div', 'chips__bar');
   const fill = el('div', 'chips__bar-fill');
-  fill.style.width = `${Math.min(100, (state.chips / WIN_GOAL) * 100)}%`;
+  fill.style.width = `${Math.min(100, (chips / WIN_GOAL) * 100)}%`;
   bar.appendChild(fill);
-  chips.appendChild(bar);
-  header.appendChild(chips);
-  return header;
+  chipsEl.appendChild(bar);
+  return chipsEl;
 }
 
-function renderDealerArea(state: GameState): HTMLElement {
-  const section = el('section', 'area');
+export function renderSetupScreen(handlers: Handlers): HTMLElement {
+  const screen = el('div', 'setup');
+  screen.appendChild(el('h1', 'title', 'Quantum Blackjack'));
+  screen.appendChild(el('p', 'hint', 'Pick how many players are seated at the table.'));
+
+  const MAX_PLAYERS = 6;
+  let count = 2;
+
+  const form = el('div', 'setup__form');
+  const countRow = el('div', 'setup__count-row');
+  countRow.appendChild(el('span', undefined, 'Players:'));
+  const countInput = el('input', 'setup__count-input');
+  countInput.type = 'number';
+  countInput.min = '1';
+  countInput.max = String(MAX_PLAYERS);
+  countInput.value = String(count);
+  countRow.appendChild(countInput);
+  form.appendChild(countRow);
+
+  const namesWrap = el('div', 'setup__names');
+  function renderNameInputs(): void {
+    namesWrap.innerHTML = '';
+    for (let i = 0; i < count; i++) {
+      const input = el('input', 'setup__name-input');
+      input.placeholder = `Player ${i + 1}`;
+      input.value = `Player ${i + 1}`;
+      namesWrap.appendChild(input);
+    }
+  }
+  renderNameInputs();
+  form.appendChild(namesWrap);
+
+  countInput.addEventListener('input', () => {
+    const parsed = Math.max(1, Math.min(MAX_PLAYERS, Number(countInput.value) || 1));
+    count = parsed;
+    renderNameInputs();
+  });
+
+  const startBtn = el('button', 'btn btn--primary', 'Start Game');
+  startBtn.addEventListener('click', () => {
+    const inputs = Array.from(namesWrap.querySelectorAll<HTMLInputElement>('.setup__name-input'));
+    const names = inputs.map((input, i) => input.value.trim() || `Player ${i + 1}`);
+    handlers.onStartGame(names);
+  });
+  form.appendChild(startBtn);
+
+  screen.appendChild(form);
+  return screen;
+}
+
+function renderDealerArea(table: TableState): HTMLElement {
+  const section = el('section', 'area dealer-area');
   section.appendChild(el('h2', 'area__title', 'Dealer'));
   const cardsRow = el('div', 'cards-row');
-  const hideHoleCard = state.status === 'player-turn';
-  state.dealerHand.forEach((card, index) => {
+  const hideHoleCard = table.phase === 'players';
+  table.dealerHand.forEach((card, index) => {
     const faceDown = hideHoleCard && index === 1;
     cardsRow.appendChild(renderCard(card, { faceDown }));
   });
@@ -129,9 +181,11 @@ function renderDealerArea(state: GameState): HTMLElement {
 
   const status = el('div', 'area__status');
   if (hideHoleCard) {
-    status.textContent = 'Dealer hand: hidden until you stand';
-  } else if (state.roundResult) {
-    status.textContent = `Dealer hand: ${state.roundResult.dealerValue}${state.roundResult.dealerBust ? ' (bust)' : ''}`;
+    status.textContent = 'Dealer hand: hidden until all players finish';
+  } else if (table.phase === 'round-over') {
+    const dealerBust = table.players[0]?.roundResult?.dealerBust;
+    const dealerValue = table.players[0]?.roundResult?.dealerValue;
+    status.textContent = `Dealer hand: ${dealerValue}${dealerBust ? ' (bust)' : ''}`;
   } else {
     status.textContent = 'Dealer hand: revealing…';
   }
@@ -139,38 +193,44 @@ function renderDealerArea(state: GameState): HTMLElement {
   return section;
 }
 
-function renderPlayerArea(state: GameState, ui: UiState, handlers: Handlers): HTMLElement {
-  const section = el('section', 'area');
-  section.appendChild(el('h2', 'area__title', 'Player'));
-  const cardsRow = el('div', 'cards-row');
+function renderSeat(player: PlayerState, index: number, table: TableState): HTMLElement {
+  const seat = el('div', 'seat');
+  if (table.phase === 'players' && index === table.activePlayerIndex) seat.classList.add('seat--active');
+  if (player.status === 'done') seat.classList.add('seat--done');
 
-  state.playerHand.forEach((card) => {
-    const entangled = !!findEntanglementForCard(state.entanglements, card.id);
-    const selected = ui.selected.includes(card.id);
-    const cardNode = renderCard(card, { entangled, selected });
+  const nameRow = el('div', 'seat__name-row');
+  nameRow.appendChild(el('span', 'seat__name', player.name));
+  if (player.id === table.firstWinnerId) nameRow.appendChild(el('span', 'seat__badge seat__badge--crown', '👑'));
+  seat.appendChild(nameRow);
 
-    const isSelectableForObserve = ui.mode === 'observe' && card.kind === 'quantum' && !card.observed;
-    const isSelectableForEntangle = ui.mode === 'entangle' && card.kind === 'quantum' && !card.observed;
-    if (isSelectableForObserve || isSelectableForEntangle) {
-      cardNode.classList.add('card--clickable');
-      cardNode.addEventListener('click', () => handlers.onCardClick(card.id));
-    }
-    cardsRow.appendChild(cardNode);
+  seat.appendChild(renderChipsBar(player.chips));
+
+  const cardsRow = el('div', 'cards-row cards-row--mini');
+  player.hand.forEach((card) => {
+    const entangled = !!findEntanglementForCard(player.entanglements, card.id);
+    cardsRow.appendChild(renderCard(card, { entangled }));
   });
-  section.appendChild(cardsRow);
+  seat.appendChild(cardsRow);
 
-  const range = computeHandRange(state.playerHand, state.entanglements);
-  const status = el('div', 'area__status');
-  status.textContent = range.isCertain
-    ? `Hand value: ${range.min}`
-    : `Hand value: ${range.values.join(', ')}`;
-  section.appendChild(status);
-  return section;
+  const status = el('div', 'seat__status');
+  if (table.phase === 'round-over' && player.roundResult) {
+    const r = player.roundResult;
+    const outcomeText = r.outcome === 'win' ? 'Win' : r.outcome === 'lose' ? 'Lose' : 'Push';
+    const badge = el('span', `seat__badge seat__badge--result seat__badge--${r.outcome}`, outcomeText);
+    status.appendChild(badge);
+    status.appendChild(el('span', undefined, ` (${r.playerValue}${r.playerBust ? ' bust' : ''}, +${r.chipsAwarded})`));
+  } else {
+    const range = computeHandRange(player.hand, player.entanglements);
+    status.textContent = range.isCertain ? `Value: ${range.min}` : `Value: ${range.values.join(', ')}`;
+  }
+  seat.appendChild(status);
+
+  return seat;
 }
 
-function renderControls(state: GameState, ui: UiState, handlers: Handlers): HTMLElement {
+function renderControls(player: PlayerState, ui: UiState, handlers: Handlers): HTMLElement {
   const controls = el('div', 'controls');
-  const canAct = state.status === 'player-turn' && ui.mode === 'idle';
+  const canAct = ui.mode === 'idle';
 
   const hitBtn = el('button', 'btn', 'Hit');
   hitBtn.disabled = !canAct;
@@ -180,13 +240,13 @@ function renderControls(state: GameState, ui: UiState, handlers: Handlers): HTML
   standBtn.disabled = !canAct;
   standBtn.addEventListener('click', handlers.onStand);
 
-  const hasUnobservedQuantum = state.playerHand.some((c) => c.kind === 'quantum' && !c.observed);
+  const hasUnobservedQuantum = player.hand.some((c) => c.kind === 'quantum' && !c.observed);
   const observeBtn = el('button', 'btn', 'Observe Quantum Card');
   observeBtn.disabled = !canAct || !hasUnobservedQuantum;
   observeBtn.addEventListener('click', handlers.onStartObserve);
 
   const entangleBtn = el('button', 'btn', 'Entangle Quantum Cards');
-  entangleBtn.disabled = !canAct || !hasUnobservedQuantum || state.chips < ENTANGLEMENT_COST;
+  entangleBtn.disabled = !canAct || !hasUnobservedQuantum || player.chips < ENTANGLEMENT_COST;
   entangleBtn.addEventListener('click', handlers.onStartEntangle);
 
   controls.append(hitBtn, standBtn, observeBtn, entangleBtn);
@@ -201,7 +261,7 @@ function renderControls(state: GameState, ui: UiState, handlers: Handlers): HTML
   return controls;
 }
 
-function renderEntanglePanel(state: GameState, ui: UiState, handlers: Handlers): HTMLElement {
+function renderEntanglePanel(player: PlayerState, ui: UiState, handlers: Handlers): HTMLElement {
   const panel = el('div', 'panel');
   panel.appendChild(el('h3', 'panel__title', 'Entangle Quantum Cards'));
   panel.appendChild(el('p', 'panel__hint', `Select two unobserved quantum cards. Cost: ${ENTANGLEMENT_COST} chip`));
@@ -218,7 +278,7 @@ function renderEntanglePanel(state: GameState, ui: UiState, handlers: Handlers):
     panel.appendChild(modeRow);
 
     const confirmBtn = el('button', 'btn btn--primary', 'Confirm Entanglement');
-    confirmBtn.disabled = !ui.pendingMode || state.chips < ENTANGLEMENT_COST;
+    confirmBtn.disabled = !ui.pendingMode || player.chips < ENTANGLEMENT_COST;
     confirmBtn.addEventListener('click', handlers.onConfirmEntangle);
     panel.appendChild(confirmBtn);
   }
@@ -227,52 +287,145 @@ function renderEntanglePanel(state: GameState, ui: UiState, handlers: Handlers):
   cancelBtn.addEventListener('click', handlers.onCancel);
   panel.appendChild(cancelBtn);
 
-  if (state.message) panel.appendChild(el('p', 'panel__error', state.message));
-
   return panel;
 }
 
-function renderRoundResult(state: GameState, handlers: Handlers): HTMLElement {
-  const result = state.roundResult!;
-  const panel = el('div', 'panel panel--result');
-  panel.appendChild(el('h3', 'panel__title', 'Round Result'));
-  panel.appendChild(el('p', undefined, `Player: ${result.playerValue}${result.playerBust ? ' (bust)' : ''}`));
-  panel.appendChild(el('p', undefined, `Dealer: ${result.dealerValue}${result.dealerBust ? ' (bust)' : ''}`));
-  const outcomeText = result.outcome === 'win' ? 'You win!' : result.outcome === 'lose' ? 'You lose.' : 'Push (tie).';
-  panel.appendChild(el('p', 'panel__outcome', outcomeText));
-  panel.appendChild(el('p', undefined, `Chips awarded: +${result.chipsAwarded}`));
-  panel.appendChild(el('p', undefined, `Total chips: ${state.chips} / ${WIN_GOAL}`));
+/** Overlay that zooms in on the active player's hand; transform-origin is set from the seat's screen position. */
+function renderPlayerOverlay(
+  table: TableState,
+  ui: UiState,
+  handlers: Handlers,
+  origin: { x: number; y: number } | null,
+): HTMLElement {
+  const player = table.players[table.activePlayerIndex];
 
-  if (!state.victory) {
-    const nextBtn = el('button', 'btn btn--primary', 'Next Round');
-    nextBtn.addEventListener('click', handlers.onNextRound);
-    panel.appendChild(nextBtn);
+  const backdrop = el('div', 'overlay-backdrop');
+  const panel = el('div', 'overlay-panel');
+  if (origin) {
+    panel.style.setProperty('--origin-x', `${origin.x}px`);
+    panel.style.setProperty('--origin-y', `${origin.y}px`);
   }
-  return panel;
+
+  panel.appendChild(el('h2', 'overlay__title', player.name));
+
+  const cardsRow = el('div', 'cards-row');
+  player.hand.forEach((card) => {
+    const entangled = !!findEntanglementForCard(player.entanglements, card.id);
+    const selected = ui.selected.includes(card.id);
+    const cardNode = renderCard(card, { entangled, selected });
+
+    const isSelectableForObserve = ui.mode === 'observe' && card.kind === 'quantum' && !card.observed;
+    const isSelectableForEntangle = ui.mode === 'entangle' && card.kind === 'quantum' && !card.observed;
+    if (isSelectableForObserve || isSelectableForEntangle) {
+      cardNode.classList.add('card--clickable');
+      cardNode.addEventListener('click', () => handlers.onCardClick(card.id));
+    }
+    cardsRow.appendChild(cardNode);
+  });
+  panel.appendChild(cardsRow);
+
+  const range = computeHandRange(player.hand, player.entanglements);
+  const status = el('div', 'area__status');
+  status.textContent = range.isCertain ? `Hand value: ${range.min}` : `Hand value: ${range.values.join(', ')}`;
+  panel.appendChild(status);
+
+  if (table.message) panel.appendChild(el('p', 'panel__error', table.message));
+
+  panel.appendChild(renderControls(player, ui, handlers));
+  if (ui.mode === 'entangle') panel.appendChild(renderEntanglePanel(player, ui, handlers));
+
+  // The DOM is rebuilt from scratch every render, so the visible/hidden CSS
+  // classes must be applied explicitly per stage rather than just once on mount:
+  // 'open' needs to render already-visible (no replay on every action while playing),
+  // 'opening'/'closing' start from the opposite state and flip on the next frame to animate.
+  if (ui.zoomStage === 'open') {
+    backdrop.classList.add('overlay-backdrop--visible');
+    panel.classList.add('overlay-panel--visible');
+  } else if (ui.zoomStage === 'opening') {
+    requestAnimationFrame(() => {
+      backdrop.classList.add('overlay-backdrop--visible');
+      panel.classList.add('overlay-panel--visible');
+    });
+  } else if (ui.zoomStage === 'closing') {
+    backdrop.classList.add('overlay-backdrop--visible');
+    panel.classList.add('overlay-panel--visible');
+    requestAnimationFrame(() => {
+      backdrop.classList.remove('overlay-backdrop--visible');
+      panel.classList.remove('overlay-panel--visible');
+    });
+  }
+
+  const wrap = el('div', 'overlay');
+  wrap.append(backdrop, panel);
+  return wrap;
 }
 
-function renderVictory(handlers: Handlers): HTMLElement {
-  const panel = el('div', 'panel panel--victory');
-  panel.appendChild(el('h2', undefined, 'You Win!'));
-  panel.appendChild(el('p', undefined, `You reached the ${WIN_GOAL}-chip goal.`));
-  const restartBtn = el('button', 'btn btn--primary', 'Restart Game');
-  restartBtn.addEventListener('click', handlers.onRestart);
-  panel.appendChild(restartBtn);
-  return panel;
+function renderWinPopup(playerName: string, handlers: Handlers): HTMLElement {
+  const backdrop = el('div', 'overlay-backdrop overlay-backdrop--visible');
+  const panel = el('div', 'panel panel--victory win-popup');
+  panel.appendChild(el('h2', undefined, '👑 We have a winner!'));
+  panel.appendChild(el('p', undefined, `${playerName} reached the ${WIN_GOAL}-chip goal.`));
+  const dismissBtn = el('button', 'btn btn--primary', 'Continue');
+  dismissBtn.addEventListener('click', handlers.onDismissWinPopup);
+  panel.appendChild(dismissBtn);
+
+  const wrap = el('div', 'overlay');
+  wrap.append(backdrop, panel);
+  return wrap;
 }
 
-export function render(root: HTMLElement, state: GameState, ui: UiState, handlers: Handlers): void {
+function nextButtonLabel(table: TableState, ui: UiState): string {
+  if (table.phase === 'round-over') return 'Deal Next Round';
+  if (table.phase === 'dealer') return 'Reveal Dealer Hand';
+  if (ui.zoomStage !== 'closed') return 'Zooming In…';
+  return 'Zoom to Next Player';
+}
+
+export function renderTableScreen(
+  table: TableState,
+  ui: UiState,
+  handlers: Handlers,
+  seatOrigin: { x: number; y: number } | null,
+): HTMLElement {
+  const wrapper = el('div', 'table');
+
+  wrapper.appendChild(renderDealerArea(table));
+
+  const seats = el('div', 'seats');
+  table.players.forEach((player, index) => seats.appendChild(renderSeat(player, index, table)));
+  wrapper.appendChild(seats);
+
+  const dealerBar = el('div', 'dealer-bar');
+  const nextBtn = el('button', 'btn btn--primary btn--next', nextButtonLabel(table, ui));
+  nextBtn.disabled = table.phase === 'players' && ui.zoomStage !== 'closed';
+  nextBtn.addEventListener('click', handlers.onNext);
+  dealerBar.appendChild(nextBtn);
+  wrapper.appendChild(dealerBar);
+
+  if (ui.zoomStage !== 'closed') {
+    wrapper.appendChild(renderPlayerOverlay(table, ui, handlers, seatOrigin));
+  }
+
+  if (ui.justWonPlayerId) {
+    const winner = table.players.find((p) => p.id === ui.justWonPlayerId);
+    if (winner) wrapper.appendChild(renderWinPopup(winner.name, handlers));
+  }
+
+  return wrapper;
+}
+
+export function render(
+  root: HTMLElement,
+  phase: AppPhase,
+  table: TableState | null,
+  ui: UiState,
+  handlers: Handlers,
+  seatOrigin: { x: number; y: number } | null,
+): void {
   root.innerHTML = '';
-  const wrapper = el('div', 'game');
-  wrapper.appendChild(renderHeader(state));
-  wrapper.appendChild(renderDealerArea(state));
-  wrapper.appendChild(renderPlayerArea(state, ui, handlers));
-  wrapper.appendChild(renderControls(state, ui, handlers));
-  if (ui.mode === 'entangle') wrapper.appendChild(renderEntanglePanel(state, ui, handlers));
-  if (state.roundResult && !state.victory) wrapper.appendChild(renderRoundResult(state, handlers));
-  if (state.victory) {
-    if (state.roundResult) wrapper.appendChild(renderRoundResult(state, handlers));
-    wrapper.appendChild(renderVictory(handlers));
+  if (phase === 'setup' || !table) {
+    root.appendChild(renderSetupScreen(handlers));
+    return;
   }
-  root.appendChild(wrapper);
+  root.appendChild(renderTableScreen(table, ui, handlers, seatOrigin));
 }
