@@ -7,8 +7,13 @@ import {
   observeCard,
   entangleCards,
   advanceDealerAndResolve,
+  dealerHit,
+  dealerStand,
+  dealerObserveCard,
+  dealerEntangleCards,
   startNextRound,
 } from './game/table';
+import type { DealerMode } from './game/table';
 import type { EntanglementMode } from './game/quantum';
 import type { AppPhase, UiState, Handlers } from './ui/render';
 import { render, createInitialUiState } from './ui/render';
@@ -49,14 +54,24 @@ function closeOverlayIfActivePlayerDone(previousActiveId: string | undefined): v
   ui = { ...ui, zoomStage: 'closing' };
   rerender();
   setTimeout(() => {
-    ui = { ...ui, zoomStage: 'closed' };
+    ui = { ...ui, zoomStage: 'closed', zoomPlayerId: null };
     rerender();
   }, ZOOM_TRANSITION_MS);
 }
 
+/** Applies a dealer action's result, popping up the win banner if it just produced the session's first winner. */
+function applyTableUpdate(next: TableState): void {
+  const hadFirstWinner = table?.firstWinnerId != null;
+  table = next;
+  if (!hadFirstWinner && table.firstWinnerId !== null) {
+    ui = { ...ui, justWonPlayerId: table.firstWinnerId };
+  }
+  rerender();
+}
+
 const handlers: Handlers = {
-  onStartGame(names: string[]) {
-    table = createTable(names);
+  onStartGame(names: string[], dealerMode: DealerMode) {
+    table = createTable(names, dealerMode);
     phase = 'table';
     ui = createInitialUiState();
     rerender();
@@ -85,6 +100,22 @@ const handlers: Handlers = {
   },
   onCardClick(cardId: string) {
     if (!table) return;
+    if (table.phase === 'dealer') {
+      if (ui.mode === 'observe') {
+        resetActionUi();
+        applyTableUpdate(dealerObserveCard(table, cardId));
+        return;
+      }
+      if (ui.mode === 'entangle') {
+        if (ui.selected.includes(cardId)) {
+          ui = { ...ui, selected: ui.selected.filter((id) => id !== cardId) };
+        } else if (ui.selected.length < 2) {
+          ui = { ...ui, selected: [...ui.selected, cardId] };
+        }
+      }
+      rerender();
+      return;
+    }
     if (ui.mode === 'observe') {
       const previousActiveId = table.players[table.activePlayerIndex]?.id;
       table = observeCard(table, table.activePlayerIndex, cardId);
@@ -108,7 +139,11 @@ const handlers: Handlers = {
   },
   onConfirmEntangle() {
     if (table && ui.selected.length === 2 && ui.pendingMode) {
-      table = entangleCards(table, table.activePlayerIndex, ui.selected[0], ui.selected[1], ui.pendingMode);
+      if (table.phase === 'dealer') {
+        applyTableUpdate(dealerEntangleCards(table, ui.selected[0], ui.selected[1], ui.pendingMode));
+      } else {
+        table = entangleCards(table, table.activePlayerIndex, ui.selected[0], ui.selected[1], ui.pendingMode);
+      }
     }
     resetActionUi();
     rerender();
@@ -120,7 +155,8 @@ const handlers: Handlers = {
   onNext() {
     if (!table) return;
     if (table.phase === 'players' && ui.zoomStage === 'closed') {
-      ui = { ...ui, zoomStage: 'opening' };
+      const activeId = table.players[table.activePlayerIndex]?.id ?? null;
+      ui = { ...ui, zoomStage: 'opening', zoomPlayerId: activeId };
       rerender();
       requestAnimationFrame(() => {
         ui = { ...ui, zoomStage: 'open' };
@@ -129,12 +165,7 @@ const handlers: Handlers = {
       return;
     }
     if (table.phase === 'dealer') {
-      const hadFirstWinner = table.firstWinnerId !== null;
-      table = advanceDealerAndResolve(table);
-      if (!hadFirstWinner && table.firstWinnerId !== null) {
-        ui = { ...ui, justWonPlayerId: table.firstWinnerId };
-      }
-      rerender();
+      applyTableUpdate(advanceDealerAndResolve(table));
       return;
     }
     if (table.phase === 'round-over') {
@@ -142,6 +173,14 @@ const handlers: Handlers = {
       ui = createInitialUiState();
       rerender();
     }
+  },
+  onDealerHit() {
+    if (!table) return;
+    applyTableUpdate(dealerHit(table));
+  },
+  onDealerStand() {
+    if (!table) return;
+    applyTableUpdate(dealerStand(table));
   },
   onDismissWinPopup() {
     ui = { ...ui, justWonPlayerId: null };

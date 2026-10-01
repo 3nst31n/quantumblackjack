@@ -21,5 +21,5 @@ export function determineOutcome(
   if (dealerBust) return { outcome: 'win', chipsAwarded: playerValue === 21 ? 3 : 2 };
   if (playerValue > dealerValue) return { outcome: 'win', chipsAwarded: playerValue === 21 ? 3 : 2 };
   if (playerValue < dealerValue) return { outcome: 'lose', chipsAwarded: 0 };
-  return { outcome: 'push', chipsAwarded: 0 };
+  return { outcome: 'push', chipsAwarded: 1 };
 }

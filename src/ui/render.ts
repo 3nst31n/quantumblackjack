@@ -2,10 +2,11 @@
 // turns a TableState + UiState into DOM elements and wires up click handlers.
 
 import type { Card } from '../game/cards';
-import type { PlayerState, TableState } from '../game/table';
-import { computeHandRange } from '../game/blackjack';
+import { hasRedCard } from '../game/cards';
+import type { DealerMode, PlayerState, TableState } from '../game/table';
+import { computeHandRange, isBust } from '../game/blackjack';
 import { WIN_GOAL, ENTANGLEMENT_COST } from '../game/chips';
-import type { EntanglementMode } from '../game/quantum';
+import type { Entanglement, EntanglementMode } from '../game/quantum';
 import { findEntanglementForCard } from '../game/quantum';
 
 export type AppPhase = 'setup' | 'table';
@@ -17,15 +18,24 @@ export interface UiState {
   selected: string[];
   pendingMode: EntanglementMode | null;
   zoomStage: ZoomStage;
+  /** Which player the overlay shows; fixed at open time so it doesn't jump to the next player while closing. */
+  zoomPlayerId: string | null;
   justWonPlayerId: string | null;
 }
 
 export function createInitialUiState(): UiState {
-  return { mode: 'idle', selected: [], pendingMode: null, zoomStage: 'closed', justWonPlayerId: null };
+  return {
+    mode: 'idle',
+    selected: [],
+    pendingMode: null,
+    zoomStage: 'closed',
+    zoomPlayerId: null,
+    justWonPlayerId: null,
+  };
 }
 
 export interface Handlers {
-  onStartGame(names: string[]): void;
+  onStartGame(names: string[], dealerMode: DealerMode): void;
   onHit(): void;
   onStand(): void;
   onStartObserve(): void;
@@ -35,7 +45,30 @@ export interface Handlers {
   onConfirmEntangle(): void;
   onCancel(): void;
   onNext(): void;
+  onDealerHit(): void;
+  onDealerStand(): void;
   onDismissWinPopup(): void;
+}
+
+/** Shared shape for rendering Hit/Stand/Observe/Entangle controls for either a player or the manual dealer. */
+interface HandControlsConfig {
+  hand: Card[];
+  entanglements: Entanglement[];
+  /** null means there is no chip cost to entangling (the dealer has no stake). */
+  chips: number | null;
+  onHit: () => void;
+  onStand: () => void;
+  onStartObserve: () => void;
+  onStartEntangle: () => void;
+  onCancel: () => void;
+}
+
+/** Shared shape for rendering the entangle-mode picker for either a player or the manual dealer. */
+interface EntanglePanelConfig {
+  chips: number | null;
+  onChooseEntangleMode: (mode: EntanglementMode) => void;
+  onConfirmEntangle: () => void;
+  onCancel: () => void;
 }
 
 const SUIT_SYMBOLS: Record<string, string> = { hearts: '♥', diamonds: '♦', clubs: '♣', spades: '♠' };
@@ -156,11 +189,39 @@ export function renderSetupScreen(handlers: Handlers): HTMLElement {
     renderNameInputs();
   });
 
+  let dealerMode: DealerMode = 'auto';
+  const dealerModeRow = el('div', 'setup__dealer-mode-row');
+  dealerModeRow.appendChild(el('span', undefined, 'Dealer:'));
+  const dealerModeOptions = el('div', 'setup__dealer-mode-options');
+  const autoLabel = el('label', 'setup__dealer-mode-option');
+  const autoRadio = el('input', 'setup__dealer-mode-radio');
+  autoRadio.type = 'radio';
+  autoRadio.name = 'dealer-mode';
+  autoRadio.value = 'auto';
+  autoRadio.checked = true;
+  autoLabel.append(autoRadio, document.createTextNode(' Automated (hits to 17 automatically)'));
+  const manualLabel = el('label', 'setup__dealer-mode-option');
+  const manualRadio = el('input', 'setup__dealer-mode-radio');
+  manualRadio.type = 'radio';
+  manualRadio.name = 'dealer-mode';
+  manualRadio.value = 'manual';
+  manualLabel.append(manualRadio, document.createTextNode(' Manual (a human plays the dealer)'));
+  dealerModeOptions.append(autoLabel, manualLabel);
+  dealerModeRow.appendChild(dealerModeOptions);
+  form.appendChild(dealerModeRow);
+
+  autoRadio.addEventListener('change', () => {
+    if (autoRadio.checked) dealerMode = 'auto';
+  });
+  manualRadio.addEventListener('change', () => {
+    if (manualRadio.checked) dealerMode = 'manual';
+  });
+
   const startBtn = el('button', 'btn btn--primary', 'Start Game');
   startBtn.addEventListener('click', () => {
     const inputs = Array.from(namesWrap.querySelectorAll<HTMLInputElement>('.setup__name-input'));
     const names = inputs.map((input, i) => input.value.trim() || `Player ${i + 1}`);
-    handlers.onStartGame(names);
+    handlers.onStartGame(names, dealerMode);
   });
   form.appendChild(startBtn);
 
@@ -168,14 +229,27 @@ export function renderSetupScreen(handlers: Handlers): HTMLElement {
   return screen;
 }
 
-function renderDealerArea(table: TableState): HTMLElement {
+function renderDealerArea(table: TableState, ui: UiState, handlers: Handlers): HTMLElement {
   const section = el('section', 'area dealer-area');
   section.appendChild(el('h2', 'area__title', 'Dealer'));
   const cardsRow = el('div', 'cards-row');
   const hideHoleCard = table.phase === 'players';
+  const manualDealerTurn = table.phase === 'dealer' && table.dealerMode === 'manual';
   table.dealerHand.forEach((card, index) => {
     const faceDown = hideHoleCard && index === 1;
-    cardsRow.appendChild(renderCard(card, { faceDown }));
+    const entangled = !!findEntanglementForCard(table.dealerEntanglements, card.id);
+    const selected = ui.selected.includes(card.id);
+    const cardNode = renderCard(card, { faceDown, entangled, selected });
+
+    if (manualDealerTurn && !faceDown) {
+      const isSelectableForObserve = ui.mode === 'observe' && card.kind === 'quantum' && !card.observed;
+      const isSelectableForEntangle = ui.mode === 'entangle' && card.kind === 'quantum' && !card.observed;
+      if (isSelectableForObserve || isSelectableForEntangle) {
+        cardNode.classList.add('card--clickable');
+        cardNode.addEventListener('click', () => handlers.onCardClick(card.id));
+      }
+    }
+    cardsRow.appendChild(cardNode);
   });
   section.appendChild(cardsRow);
 
@@ -187,7 +261,10 @@ function renderDealerArea(table: TableState): HTMLElement {
     const dealerValue = table.players[0]?.roundResult?.dealerValue;
     status.textContent = `Dealer hand: ${dealerValue}${dealerBust ? ' (bust)' : ''}`;
   } else {
-    status.textContent = 'Dealer hand: revealing…';
+    const range = computeHandRange(table.dealerHand, table.dealerEntanglements);
+    status.textContent = range.isCertain
+      ? `Dealer hand: ${range.min}${isBust(range.min) ? ' (bust)' : ''}`
+      : `Dealer hand: ${range.values.join(', ')}`;
   }
   section.appendChild(status);
   return section;
@@ -228,43 +305,52 @@ function renderSeat(player: PlayerState, index: number, table: TableState): HTML
   return seat;
 }
 
-function renderControls(player: PlayerState, ui: UiState, handlers: Handlers): HTMLElement {
+/** Hit/Stand/Observe/Entangle controls, shared by the player overlay and the manual dealer. */
+function renderHandControls(config: HandControlsConfig, ui: UiState): HTMLElement {
   const controls = el('div', 'controls');
   const canAct = ui.mode === 'idle';
 
   const hitBtn = el('button', 'btn', 'Hit');
   hitBtn.disabled = !canAct;
-  hitBtn.addEventListener('click', handlers.onHit);
+  hitBtn.addEventListener('click', config.onHit);
 
   const standBtn = el('button', 'btn', 'Stand');
   standBtn.disabled = !canAct;
-  standBtn.addEventListener('click', handlers.onStand);
+  standBtn.addEventListener('click', config.onStand);
 
-  const hasUnobservedQuantum = player.hand.some((c) => c.kind === 'quantum' && !c.observed);
+  const hasUnobservedQuantum = config.hand.some((c) => c.kind === 'quantum' && !c.observed);
+  const canObserveNow = hasRedCard(config.hand);
   const observeBtn = el('button', 'btn', 'Observe Quantum Card');
-  observeBtn.disabled = !canAct || !hasUnobservedQuantum;
-  observeBtn.addEventListener('click', handlers.onStartObserve);
+  observeBtn.disabled = !canAct || !hasUnobservedQuantum || !canObserveNow;
+  observeBtn.addEventListener('click', config.onStartObserve);
 
+  const canAffordEntangle = config.chips === null || config.chips >= ENTANGLEMENT_COST;
   const entangleBtn = el('button', 'btn', 'Entangle Quantum Cards');
-  entangleBtn.disabled = !canAct || !hasUnobservedQuantum || player.chips < ENTANGLEMENT_COST;
-  entangleBtn.addEventListener('click', handlers.onStartEntangle);
+  entangleBtn.disabled = !canAct || !hasUnobservedQuantum || !canAffordEntangle;
+  entangleBtn.addEventListener('click', config.onStartEntangle);
 
   controls.append(hitBtn, standBtn, observeBtn, entangleBtn);
+
+  if (hasUnobservedQuantum && !canObserveNow) {
+    controls.append(el('div', 'hint', 'Need a red card (hearts or diamonds) in hand to observe.'));
+  }
 
   if (ui.mode === 'observe') {
     const hint = el('div', 'hint', 'Select an unobserved quantum card to collapse it.');
     const cancelBtn = el('button', 'btn btn--ghost', 'Cancel');
-    cancelBtn.addEventListener('click', handlers.onCancel);
+    cancelBtn.addEventListener('click', config.onCancel);
     controls.append(hint, cancelBtn);
   }
 
   return controls;
 }
 
-function renderEntanglePanel(player: PlayerState, ui: UiState, handlers: Handlers): HTMLElement {
+/** Entangle-mode picker, shared by the player overlay and the manual dealer. */
+function renderEntanglePanel(config: EntanglePanelConfig, ui: UiState): HTMLElement {
   const panel = el('div', 'panel');
   panel.appendChild(el('h3', 'panel__title', 'Entangle Quantum Cards'));
-  panel.appendChild(el('p', 'panel__hint', `Select two unobserved quantum cards. Cost: ${ENTANGLEMENT_COST} chip`));
+  const costLabel = config.chips === null ? 'Free for the dealer.' : `Cost: ${ENTANGLEMENT_COST} chip`;
+  panel.appendChild(el('p', 'panel__hint', `Select two unobserved quantum cards. ${costLabel}`));
   panel.appendChild(el('p', 'panel__selection', `Selected: ${ui.selected.length} / 2`));
 
   if (ui.selected.length === 2) {
@@ -272,32 +358,34 @@ function renderEntanglePanel(player: PlayerState, ui: UiState, handlers: Handler
     (['SAME', 'OPPOSITE'] as EntanglementMode[]).forEach((mode) => {
       const btn = el('button', 'btn', mode);
       if (ui.pendingMode === mode) btn.classList.add('btn--active');
-      btn.addEventListener('click', () => handlers.onChooseEntangleMode(mode));
+      btn.addEventListener('click', () => config.onChooseEntangleMode(mode));
       modeRow.appendChild(btn);
     });
     panel.appendChild(modeRow);
 
+    const canAffordEntangle = config.chips === null || config.chips >= ENTANGLEMENT_COST;
     const confirmBtn = el('button', 'btn btn--primary', 'Confirm Entanglement');
-    confirmBtn.disabled = !ui.pendingMode || player.chips < ENTANGLEMENT_COST;
-    confirmBtn.addEventListener('click', handlers.onConfirmEntangle);
+    confirmBtn.disabled = !ui.pendingMode || !canAffordEntangle;
+    confirmBtn.addEventListener('click', config.onConfirmEntangle);
     panel.appendChild(confirmBtn);
   }
 
   const cancelBtn = el('button', 'btn btn--ghost', 'Cancel');
-  cancelBtn.addEventListener('click', handlers.onCancel);
+  cancelBtn.addEventListener('click', config.onCancel);
   panel.appendChild(cancelBtn);
 
   return panel;
 }
 
-/** Overlay that zooms in on the active player's hand; transform-origin is set from the seat's screen position. */
+/** Overlay that zooms in on the player fixed by ui.zoomPlayerId; transform-origin is set from the seat's screen position. */
 function renderPlayerOverlay(
   table: TableState,
   ui: UiState,
   handlers: Handlers,
   origin: { x: number; y: number } | null,
-): HTMLElement {
-  const player = table.players[table.activePlayerIndex];
+): HTMLElement | null {
+  const player = table.players.find((p) => p.id === ui.zoomPlayerId);
+  if (!player) return null;
 
   const backdrop = el('div', 'overlay-backdrop');
   const panel = el('div', 'overlay-panel');
@@ -331,8 +419,30 @@ function renderPlayerOverlay(
 
   if (table.message) panel.appendChild(el('p', 'panel__error', table.message));
 
-  panel.appendChild(renderControls(player, ui, handlers));
-  if (ui.mode === 'entangle') panel.appendChild(renderEntanglePanel(player, ui, handlers));
+  const handControlsConfig: HandControlsConfig = {
+    hand: player.hand,
+    entanglements: player.entanglements,
+    chips: player.chips,
+    onHit: handlers.onHit,
+    onStand: handlers.onStand,
+    onStartObserve: handlers.onStartObserve,
+    onStartEntangle: handlers.onStartEntangle,
+    onCancel: handlers.onCancel,
+  };
+  panel.appendChild(renderHandControls(handControlsConfig, ui));
+  if (ui.mode === 'entangle') {
+    panel.appendChild(
+      renderEntanglePanel(
+        {
+          chips: player.chips,
+          onChooseEntangleMode: handlers.onChooseEntangleMode,
+          onConfirmEntangle: handlers.onConfirmEntangle,
+          onCancel: handlers.onCancel,
+        },
+        ui,
+      ),
+    );
+  }
 
   // The DOM is rebuilt from scratch every render, so the visible/hidden CSS
   // classes must be applied explicitly per stage rather than just once on mount:
@@ -389,21 +499,53 @@ export function renderTableScreen(
 ): HTMLElement {
   const wrapper = el('div', 'table');
 
-  wrapper.appendChild(renderDealerArea(table));
+  wrapper.appendChild(renderDealerArea(table, ui, handlers));
 
   const seats = el('div', 'seats');
   table.players.forEach((player, index) => seats.appendChild(renderSeat(player, index, table)));
   wrapper.appendChild(seats);
 
   const dealerBar = el('div', 'dealer-bar');
-  const nextBtn = el('button', 'btn btn--primary btn--next', nextButtonLabel(table, ui));
-  nextBtn.disabled = table.phase === 'players' && ui.zoomStage !== 'closed';
-  nextBtn.addEventListener('click', handlers.onNext);
-  dealerBar.appendChild(nextBtn);
+  const manualDealerTurn = table.phase === 'dealer' && table.dealerMode === 'manual';
+  if (manualDealerTurn) {
+    const manualPanel = el('div', 'dealer-bar__manual');
+    const dealerHandControlsConfig: HandControlsConfig = {
+      hand: table.dealerHand,
+      entanglements: table.dealerEntanglements,
+      chips: null,
+      onHit: handlers.onDealerHit,
+      onStand: handlers.onDealerStand,
+      onStartObserve: handlers.onStartObserve,
+      onStartEntangle: handlers.onStartEntangle,
+      onCancel: handlers.onCancel,
+    };
+    manualPanel.appendChild(renderHandControls(dealerHandControlsConfig, ui));
+    if (table.message) manualPanel.appendChild(el('p', 'panel__error', table.message));
+    if (ui.mode === 'entangle') {
+      manualPanel.appendChild(
+        renderEntanglePanel(
+          {
+            chips: null,
+            onChooseEntangleMode: handlers.onChooseEntangleMode,
+            onConfirmEntangle: handlers.onConfirmEntangle,
+            onCancel: handlers.onCancel,
+          },
+          ui,
+        ),
+      );
+    }
+    dealerBar.appendChild(manualPanel);
+  } else {
+    const nextBtn = el('button', 'btn btn--primary btn--next', nextButtonLabel(table, ui));
+    nextBtn.disabled = table.phase === 'players' && ui.zoomStage !== 'closed';
+    nextBtn.addEventListener('click', handlers.onNext);
+    dealerBar.appendChild(nextBtn);
+  }
   wrapper.appendChild(dealerBar);
 
   if (ui.zoomStage !== 'closed') {
-    wrapper.appendChild(renderPlayerOverlay(table, ui, handlers, seatOrigin));
+    const overlay = renderPlayerOverlay(table, ui, handlers, seatOrigin);
+    if (overlay) wrapper.appendChild(overlay);
   }
 
   if (ui.justWonPlayerId) {

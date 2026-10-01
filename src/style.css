@@ -82,6 +82,28 @@ body {
   color: var(--text);
 }
 
+.setup__dealer-mode-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.setup__dealer-mode-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.setup__dealer-mode-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.9em;
+  color: var(--muted);
+  cursor: pointer;
+}
+
 /* ---------- Full-screen table ---------- */
 
 .table {
@@ -242,6 +264,13 @@ body {
 .dealer-bar {
   display: flex;
   justify-content: center;
+}
+
+.dealer-bar__manual {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
 }
 
 .btn--next {
@@ -481,12 +510,14 @@ body {
   transform: translate(-50%, -50%) scale(0.15);
   transform-origin: var(--origin-x, 50%) var(--origin-y, 50%);
   opacity: 0;
+  pointer-events: none;
   transition: transform 0.3s ease, opacity 0.25s ease;
 }
 
 .overlay-panel--visible {
   transform: translate(-50%, -50%) scale(1);
   opacity: 1;
+  pointer-events: auto;
 }
 
 .overlay__title {

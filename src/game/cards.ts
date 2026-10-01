@@ -36,6 +36,15 @@ export interface QuantumCard {
 
 export type Card = RegularCard | QuantumCard;
 
+export function isRedCard(card: Card): boolean {
+  return card.kind === 'regular' && (card.suit === 'hearts' || card.suit === 'diamonds');
+}
+
+/** Observing a quantum card requires some red (hearts/diamonds) card already in hand. */
+export function hasRedCard(hand: Card[]): boolean {
+  return hand.some(isRedCard);
+}
+
 export function createRegularDeck(): RegularCard[] {
   const cards: RegularCard[] = [];
   for (const suit of SUITS) {

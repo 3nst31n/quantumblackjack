@@ -6,6 +6,7 @@ import {
   observeCard,
   entangleCards,
   advanceDealerAndResolve,
+  dealerStand,
   startNextRound,
 } from './table';
 import { ENTANGLEMENT_COST, STARTING_CHIPS, WIN_GOAL } from './chips';
@@ -99,13 +100,132 @@ describe('table: quantum actions scoped per player', () => {
     expect(table.players[0].chips).toBe(before);
   });
 
-  it('collapses a quantum card via observeCard without ending the turn', () => {
+  it('collapses a quantum card via observeCard without ending the turn (with a red card in hand)', () => {
     let table = createTable(['A', 'B']);
+    table = {
+      ...table,
+      players: table.players.map((p, i) =>
+        i === 0 ? { ...p, hand: [...p.hand, { kind: 'regular', id: 'R-A-hearts-test', rank: 'A', suit: 'hearts' }] } : p,
+      ),
+    };
     const quantumCard = table.players[0].hand.find((c) => c.kind === 'quantum');
     if (!quantumCard) return; // no quantum card dealt this round, skip
     table = observeCard(table, 0, quantumCard.id);
     const observed = table.players[0].hand.find((c) => c.id === quantumCard.id);
     expect(observed?.kind === 'quantum' && observed.observed).toBe(true);
+  });
+
+  it('refuses to observe a quantum card without a red card in hand', () => {
+    let table = createTable(['A', 'B']);
+    table = {
+      ...table,
+      players: table.players.map((p, i) =>
+        i === 0
+          ? { ...p, hand: p.hand.filter((c) => !(c.kind === 'regular' && (c.suit === 'hearts' || c.suit === 'diamonds'))) }
+          : p,
+      ),
+    };
+    table = {
+      ...table,
+      players: table.players.map((p, i) =>
+        i === 0 ? { ...p, hand: [...p.hand, { kind: 'quantum', id: 'Q-test', values: [1, 10], observed: false }] } : p,
+      ),
+    };
+    const quantumCard = table.players[0].hand.find((c) => c.id === 'Q-test')!;
+    table = observeCard(table, 0, quantumCard.id);
+    const observed = table.players[0].hand.find((c) => c.id === quantumCard.id);
+    expect(observed?.kind === 'quantum' && observed.observed).toBe(false);
+    expect(table.message).toMatch(/red card/i);
+  });
+});
+
+describe('table: standing in superposition', () => {
+  it('leaves an unobserved quantum card uncollapsed when standing', () => {
+    let table = createTable(['A', 'B'], 'manual');
+    table = {
+      ...table,
+      players: table.players.map((p, i) =>
+        i === 0
+          ? {
+              ...p,
+              hand: [
+                { kind: 'regular', id: 'R-10-spades-test', rank: '10', suit: 'spades' },
+                { kind: 'quantum', id: 'Q-super-1', values: [5, 15], observed: false },
+              ],
+            }
+          : p,
+      ),
+    };
+    table = playerStand(table, 0);
+    const card = table.players[0].hand.find((c) => c.id === 'Q-super-1');
+    expect(card?.kind === 'quantum' && card.observed).toBe(false);
+    expect(table.players[0].status).toBe('done');
+    expect(table.players[0].finalValue).toBeNull();
+  });
+
+  it('wins via the non-busting branch (e.g. 15|25) when the dealer busts', () => {
+    let table = createTable(['A', 'B'], 'manual');
+    table = {
+      ...table,
+      players: table.players.map((p, i) =>
+        i === 0
+          ? {
+              ...p,
+              hand: [
+                { kind: 'regular', id: 'R-10-spades-test', rank: '10', suit: 'spades' },
+                { kind: 'quantum', id: 'Q-super-1', values: [5, 15], observed: false },
+              ],
+            }
+          : p,
+      ),
+    };
+    table = playerStand(table, 0);
+    table = playerStand(table, 1);
+    expect(table.phase).toBe('dealer');
+
+    table = {
+      ...table,
+      dealerHand: [
+        { kind: 'regular', id: 'R-10-hearts-test', rank: '10', suit: 'hearts' },
+        { kind: 'regular', id: 'R-10-clubs-test', rank: '10', suit: 'clubs' },
+        { kind: 'regular', id: 'R-5-clubs-test', rank: '5', suit: 'clubs' },
+      ],
+    };
+    table = dealerStand(table);
+
+    expect(table.phase).toBe('round-over');
+    const result = table.players[0].roundResult!;
+    expect(result.dealerBust).toBe(true);
+    expect(result.playerValue).toBe(15);
+    expect(result.playerBust).toBe(false);
+    expect(result.outcome).toBe('win');
+  });
+
+  it('randomly collapses a standing superposition hand when the dealer does not bust', () => {
+    let table = createTable(['A', 'B'], 'manual');
+    table = {
+      ...table,
+      players: table.players.map((p, i) =>
+        i === 0 ? { ...p, hand: [{ kind: 'quantum', id: 'Q-super-2', values: [15, 20], observed: false }] } : p,
+      ),
+    };
+    table = playerStand(table, 0);
+    table = playerStand(table, 1);
+
+    table = {
+      ...table,
+      dealerHand: [
+        { kind: 'regular', id: 'R-9-hearts-test', rank: '9', suit: 'hearts' },
+        { kind: 'regular', id: 'R-9-clubs-test', rank: '9', suit: 'clubs' },
+      ],
+    };
+    table = dealerStand(table);
+
+    const result = table.players[0].roundResult!;
+    expect(result.dealerBust).toBe(false);
+    expect([15, 20]).toContain(result.playerValue);
+    const resolvedCard = table.players[0].hand.find((c) => c.id === 'Q-super-2');
+    expect(resolvedCard?.kind === 'quantum' && resolvedCard.observed).toBe(true);
   });
 });
 

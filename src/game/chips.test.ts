@@ -14,8 +14,8 @@ describe('chip rewards', () => {
     expect(determineOutcome(18, false, 20, false)).toEqual({ outcome: 'lose', chipsAwarded: 0 });
   });
 
-  it('awards 0 chips for a tie/push', () => {
-    expect(determineOutcome(19, false, 19, false)).toEqual({ outcome: 'push', chipsAwarded: 0 });
+  it('awards 1 chip for a tie/push', () => {
+    expect(determineOutcome(19, false, 19, false)).toEqual({ outcome: 'push', chipsAwarded: 1 });
   });
 
   it('a player bust always loses, even if the dealer also busts', () => {
@@ -26,7 +26,7 @@ describe('chip rewards', () => {
     expect(determineOutcome(18, false, 24, true)).toEqual({ outcome: 'win', chipsAwarded: 2 });
   });
 
-  it('the win goal is 15 chips', () => {
-    expect(WIN_GOAL).toBe(15);
+  it('the win goal is 10 chips', () => {
+    expect(WIN_GOAL).toBe(10);
   });
 });
