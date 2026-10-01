@@ -3,7 +3,7 @@
 
 import type { Card, QuantumCard } from './cards';
 import type { Entanglement } from './quantum';
-import { findEntanglementForCard, findPartnerId } from './quantum';
+import { findEntanglementForCard, findPartnerId, observeQuantumCard } from './quantum';
 
 interface ValueEntry {
   value: number;
@@ -14,7 +14,6 @@ interface ValueEntry {
 function knownValue(card: Card): ValueEntry | null {
   if (card.kind === 'regular') {
     if (card.rank === 'A') return { value: 11, isAce: true };
-    if (card.rank === 'J' || card.rank === 'Q' || card.rank === 'K') return { value: 10, isAce: false };
     return { value: Number(card.rank), isAce: false };
   }
   if (card.observed && card.result !== undefined) return { value: card.result, isAce: false };
@@ -55,11 +54,15 @@ export interface HandRange {
 }
 
 /**
- * Computes the range of possible final values for a hand that may still contain
- * unobserved quantum cards. Entangled pairs are treated as a single choice
- * (their side is linked), independent quantum cards are each a free choice.
+ * Splits a hand into known values plus independent "choices" for the remaining
+ * unobserved quantum cards: entangled pairs share one choice (their side), while
+ * unentangled cards are each their own choice. Shared by computeHandRange and
+ * resolveHandFavorably so both agree on how a hand's uncertainty is structured.
  */
-export function computeHandRange(cards: Card[], entanglements: Entanglement[]): HandRange {
+function groupUnresolved(
+  cards: Card[],
+  entanglements: Entanglement[],
+): { known: ValueEntry[]; groups: QuantumCard[][] } {
   const known: ValueEntry[] = [];
   const unresolved: QuantumCard[] = [];
   for (const card of cards) {
@@ -68,13 +71,6 @@ export function computeHandRange(cards: Card[], entanglements: Entanglement[]): 
     else if (card.kind === 'quantum') unresolved.push(card);
   }
 
-  if (unresolved.length === 0) {
-    const value = evaluateValues(known);
-    return { min: value, max: value, values: [value], isCertain: true };
-  }
-
-  // Group unresolved quantum cards into independent "choices": entangled pairs
-  // share one choice (their side), unentangled cards are each their own choice.
   const groups: QuantumCard[][] = [];
   const grouped = new Set<string>();
   for (const card of unresolved) {
@@ -90,26 +86,86 @@ export function computeHandRange(cards: Card[], entanglements: Entanglement[]): 
       grouped.add(card.id);
     }
   }
+  return { known, groups };
+}
+
+/** Resolves one bitmask (one side choice per group) into the list of card values it implies. */
+function valuesForMask(
+  known: ValueEntry[],
+  groups: QuantumCard[][],
+  entanglements: Entanglement[],
+  mask: number,
+): ValueEntry[] {
+  const values = [...known];
+  groups.forEach((group, i) => {
+    const side = ((mask >> i) & 1) as 0 | 1;
+    if (group.length === 1) {
+      values.push({ value: group[0].values[side], isAce: false });
+    } else {
+      const [a, b] = group;
+      const entanglement = findEntanglementForCard(entanglements, a.id)!;
+      const sideB = entanglement.mode === 'SAME' ? side : side === 0 ? 1 : 0;
+      values.push({ value: a.values[side], isAce: false });
+      values.push({ value: b.values[sideB], isAce: false });
+    }
+  });
+  return values;
+}
+
+/**
+ * Computes the range of possible final values for a hand that may still contain
+ * unobserved quantum cards. Entangled pairs are treated as a single choice
+ * (their side is linked), independent quantum cards are each a free choice.
+ */
+export function computeHandRange(cards: Card[], entanglements: Entanglement[]): HandRange {
+  const { known, groups } = groupUnresolved(cards, entanglements);
+
+  if (groups.length === 0) {
+    const value = evaluateValues(known);
+    return { min: value, max: value, values: [value], isCertain: true };
+  }
 
   const totals: number[] = [];
   const comboCount = 1 << groups.length;
   for (let mask = 0; mask < comboCount; mask++) {
-    const values = [...known];
-    groups.forEach((group, i) => {
-      const side = ((mask >> i) & 1) as 0 | 1;
-      if (group.length === 1) {
-        values.push({ value: group[0].values[side], isAce: false });
-      } else {
-        const [a, b] = group;
-        const entanglement = findEntanglementForCard(entanglements, a.id)!;
-        const sideB = entanglement.mode === 'SAME' ? side : side === 0 ? 1 : 0;
-        values.push({ value: a.values[side], isAce: false });
-        values.push({ value: b.values[sideB], isAce: false });
-      }
-    });
-    totals.push(evaluateValues(values));
+    totals.push(evaluateValues(valuesForMask(known, groups, entanglements, mask)));
   }
 
   const distinct = [...new Set(totals)].sort((a, b) => a - b);
   return { min: Math.min(...totals), max: Math.max(...totals), values: distinct, isCertain: false };
+}
+
+/**
+ * Collapses every remaining unobserved quantum card in a hand toward the best
+ * reachable outcome: the highest non-busting total if one exists among the
+ * hand's possible branches, otherwise the smallest (least-bad) bust. Used when
+ * the dealer has busted, so a player who stood in superposition gets the
+ * benefit of the doubt instead of a random collapse.
+ */
+export function resolveHandFavorably(cards: Card[], entanglements: Entanglement[]): void {
+  const { known, groups } = groupUnresolved(cards, entanglements);
+  if (groups.length === 0) return;
+
+  let bestMask: number | null = null;
+  let bestTotal = -Infinity;
+  let fallbackMask = 0;
+  let fallbackTotal = Infinity;
+  const comboCount = 1 << groups.length;
+  for (let mask = 0; mask < comboCount; mask++) {
+    const total = evaluateValues(valuesForMask(known, groups, entanglements, mask));
+    if (total <= 21 && total > bestTotal) {
+      bestTotal = total;
+      bestMask = mask;
+    }
+    if (total < fallbackTotal) {
+      fallbackTotal = total;
+      fallbackMask = mask;
+    }
+  }
+
+  const mask = bestMask ?? fallbackMask;
+  groups.forEach((group, i) => {
+    const side = ((mask >> i) & 1) as 0 | 1;
+    observeQuantumCard(group[0], cards, entanglements, side);
+  });
 }
