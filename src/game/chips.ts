@@ -1,5 +1,6 @@
 // Chip reward rules, kept separate from hand-value math.
 
+export const STARTING_CHIPS = 3;
 export const WIN_GOAL = 10;
 export const ENTANGLEMENT_COST = 1;
 
@@ -20,5 +21,5 @@ export function determineOutcome(
   if (dealerBust) return { outcome: 'win', chipsAwarded: playerValue === 21 ? 3 : 2 };
   if (playerValue > dealerValue) return { outcome: 'win', chipsAwarded: playerValue === 21 ? 3 : 2 };
   if (playerValue < dealerValue) return { outcome: 'lose', chipsAwarded: 0 };
-  return { outcome: 'push', chipsAwarded: 0 };
+  return { outcome: 'push', chipsAwarded: 1 };
 }

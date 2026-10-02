@@ -3,6 +3,7 @@
 // just links two coin flips together. No deeper "physics" than that.
 
 import type { Card, QuantumCard } from './cards';
+import { hasRedCard } from './cards';
 
 export type EntanglementMode = 'SAME' | 'OPPOSITE';
 
@@ -20,6 +21,19 @@ export function isQuantumCard(card: Card | undefined): card is QuantumCard {
 export interface EntangleValidationResult {
   ok: boolean;
   reason?: string;
+}
+
+export interface ObserveValidationResult {
+  ok: boolean;
+  reason?: string;
+}
+
+/** A quantum card can only be observed while the hand also holds a red (hearts/diamonds) card. */
+export function canObserve(hand: Card[]): ObserveValidationResult {
+  if (!hasRedCard(hand)) {
+    return { ok: false, reason: 'You need a red card (hearts or diamonds) in hand to observe a quantum card.' };
+  }
+  return { ok: true };
 }
 
 export function canEntangle(
